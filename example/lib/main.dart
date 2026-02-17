@@ -190,19 +190,22 @@ class _PrinterDemoScreenState extends State<PrinterDemoScreen> {
     }
   }
 
-  // ─── Diagnostic ticket using flutter_esc_pos_utils ───
+  // ─── Diagnostic ticket: Generator for format + encodeText for text ───
   //
-  // This demonstrates how to use the Generator class to build
-  // a real formatted ticket with styles, code tables, and cuts.
+  // flutter_esc_pos_utils Generator handles formatting (bold, align, hr, cut)
+  // but its internal encoding doesn't work for Spanish characters on all printers.
+  // Solution: use Generator for formatting, encodeText() for text content.
   Future<void> _printDiagnosticTicket() async {
     try {
       final profile = await CapabilityProfile.load();
       final gen = Generator(PaperSize.mm80, profile);
       List<int> bytes = [];
 
-      bytes += gen.setGlobalCodeTable('CP850');
+      // Inicializar + seleccionar CP850
+      bytes.addAll([0x1B, 0x40]); // ESC @ init
+      bytes.addAll([0x1B, 0x74, 0x02]); // ESC t 2 = CP850
 
-      // Encabezado
+      // Encabezado (ASCII puro → Generator OK)
       bytes += gen.text(
         '=== TICKET DIAGNOSTICO ===',
         styles: const PosStyles(
@@ -216,20 +219,34 @@ class _PrinterDemoScreenState extends State<PrinterDemoScreen> {
 
       // Info del dispositivo
       bytes += gen.text('Impresora:', styles: const PosStyles(bold: true));
-      bytes += gen.text(
-        '  ${_printer.connectedDevice?.productName ?? "Desconocida"}',
+      bytes.addAll(
+        await _printer.encodeText(
+          '  ${_printer.connectedDevice?.productName ?? "Desconocida"}\n',
+        ),
       );
-      bytes += gen.text('  VID: ${_printer.connectedDevice?.vendorId ?? 0}');
-      bytes += gen.text('  PID: ${_printer.connectedDevice?.productId ?? 0}');
-      bytes += gen.text(
-        '  Fabricante: ${_printer.connectedDevice?.manufacturerName ?? "N/A"}',
+      bytes.addAll(
+        await _printer.encodeText(
+          '  VID: ${_printer.connectedDevice?.vendorId ?? 0}\n',
+        ),
+      );
+      bytes.addAll(
+        await _printer.encodeText(
+          '  PID: ${_printer.connectedDevice?.productId ?? 0}\n',
+        ),
+      );
+      bytes.addAll(
+        await _printer.encodeText(
+          '  Fabricante: ${_printer.connectedDevice?.manufacturerName ?? "N/A"}\n',
+        ),
       );
       bytes += gen.hr();
 
-      // Configuracion
-      bytes += gen.text('Configuracion:', styles: const PosStyles(bold: true));
-      bytes += gen.text('  Ancho de papel: 80mm');
-      bytes += gen.text('  Fecha: ${_formatDate(DateTime.now())}');
+      // Configuración
+      bytes.addAll(await _printer.encodeText('Configuración:\n'));
+      bytes.addAll(await _printer.encodeText('  Ancho de papel: 80mm\n'));
+      bytes.addAll(
+        await _printer.encodeText('  Fecha: ${_formatDate(DateTime.now())}\n'),
+      );
       bytes += gen.hr();
 
       // Status en vivo
@@ -237,32 +254,54 @@ class _PrinterDemoScreenState extends State<PrinterDemoScreen> {
       if (mounted) setState(() => _status = status);
 
       bytes += gen.text('Estado:', styles: const PosStyles(bold: true));
-      bytes += gen.text('  Soporta status: ${status.supported ? "Si" : "No"}');
+      bytes.addAll(
+        await _printer.encodeText(
+          '  Soporta status: ${status.supported ? "Sí" : "No"}\n',
+        ),
+      );
       if (status.supported) {
-        bytes += gen.text('  Papel: ${status.paperOk ? "OK" : "SIN PAPEL"}');
-        if (status.paperNearEnd) {
-          bytes += gen.text('  >> Papel por acabarse');
-        }
-        bytes += gen.text(
-          '  Tapa: ${status.coverClosed ? "Cerrada" : "ABIERTA"}',
+        bytes.addAll(
+          await _printer.encodeText(
+            '  Papel: ${status.paperOk ? "OK" : "SIN PAPEL"}\n',
+          ),
         );
-        bytes += gen.text('  Online: ${status.online ? "Si" : "No"}');
+        if (status.paperNearEnd) {
+          bytes.addAll(await _printer.encodeText('  >> Papel por acabarse\n'));
+        }
+        bytes.addAll(
+          await _printer.encodeText(
+            '  Tapa: ${status.coverClosed ? "Cerrada" : "ABIERTA"}\n',
+          ),
+        );
+        bytes.addAll(
+          await _printer.encodeText(
+            '  Online: ${status.online ? "Sí" : "No"}\n',
+          ),
+        );
         if (status.autoCutterError) {
-          bytes += gen.text('  >> Error cuchilla');
+          bytes.addAll(await _printer.encodeText('  >> Error cuchilla\n'));
         }
         if (status.unrecoverableError) {
-          bytes += gen.text('  >> Error irrecuperable');
+          bytes.addAll(await _printer.encodeText('  >> Error irrecuperable\n'));
         }
         if (status.autoRecoverableError) {
-          bytes += gen.text('  >> Error auto-recuperable');
+          bytes.addAll(
+            await _printer.encodeText('  >> Error auto-recuperable\n'),
+          );
         }
-        bytes += gen.text('  Resumen: ${status.summaryText}');
+        bytes.addAll(
+          await _printer.encodeText('  Resumen: ${status.summaryText}\n'),
+        );
       }
       bytes += gen.hr();
 
-      // Cola de impresion
-      bytes += gen.text('Cola:', styles: const PosStyles(bold: true));
-      bytes += gen.text('  Pendientes: ${_printer.pendingJobCount}');
+      // Cola de impresión
+      bytes.addAll(await _printer.encodeText('Cola:\n'));
+      bytes.addAll(
+        await _printer.encodeText(
+          '  Pendientes: ${_printer.pendingJobCount}\n',
+        ),
+      );
       bytes += gen.hr();
 
       // Test de caracteres
@@ -273,9 +312,9 @@ class _PrinterDemoScreenState extends State<PrinterDemoScreen> {
       bytes += gen.text('  ABCDEFGHIJKLMNOPQRSTUVWXYZ');
       bytes += gen.text('  abcdefghijklmnopqrstuvwxyz');
       bytes += gen.text('  0123456789');
-      bytes += gen.text('  Español: áéíóúñü ÁÉÍÓÚÑÜ');
-      bytes += gen.text('  Símbolos: ¡Hola! ¿Qué tal? °C');
-      bytes += gen.text('  Moneda: Bs. 1.250,00');
+      bytes.addAll(await _printer.encodeText('  Español: áéíóúñü ÁÉÍÓÚÑÜ\n'));
+      bytes.addAll(await _printer.encodeText('  Símbolos: ¡Hola! ¿Qué tal?\n'));
+      bytes.addAll(await _printer.encodeText('  Moneda: Bs. 1.250,00\n'));
       bytes += gen.hr();
 
       // Corte parcial
