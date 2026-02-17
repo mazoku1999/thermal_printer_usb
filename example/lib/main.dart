@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -92,63 +91,106 @@ class _PrinterDemoScreenState extends State<PrinterDemoScreen> {
     if (mounted) setState(() => _status = status);
   }
 
-  // ─── Raw bytes test (UTF-8, no extra dependencies) ───
+  // ─── Codifica texto Unicode → CP850 para impresoras térmicas ───
+  //
+  // Las impresoras térmicas NO entienden UTF-8. Usan code pages
+  // de un solo byte. CP850 cubre español completo (ñ, acentos, ¡¿).
+  static const _cp850Map = <int, int>{
+    0x00E1: 0xA0, // á
+    0x00E9: 0x82, // é
+    0x00ED: 0xA1, // í
+    0x00F3: 0xA2, // ó
+    0x00FA: 0xA3, // ú
+    0x00F1: 0xA4, // ñ
+    0x00D1: 0xA5, // Ñ
+    0x00C1: 0xB5, // Á
+    0x00C9: 0x90, // É
+    0x00CD: 0xD6, // Í
+    0x00D3: 0xE0, // Ó
+    0x00DA: 0xE9, // Ú
+    0x00FC: 0x81, // ü
+    0x00DC: 0x9A, // Ü
+    0x00BF: 0xA8, // ¿
+    0x00A1: 0xAD, // ¡
+    0x00BA: 0xF8, // º (grados)
+  };
+
+  List<int> _encodeCp850(String text) {
+    final bytes = <int>[];
+    for (final char in text.codeUnits) {
+      if (_cp850Map.containsKey(char)) {
+        bytes.add(_cp850Map[char]!);
+      } else if (char < 128) {
+        bytes.add(char); // ASCII normal
+      } else {
+        bytes.add(0x3F); // ? para caracteres no soportados
+      }
+    }
+    return bytes;
+  }
+
+  // ─── Raw bytes test (CP850, no extra dependencies) ───
   Future<void> _printTestPage() async {
     final bytes = <int>[];
 
     // Initialize printer
     bytes.addAll([0x1B, 0x40]); // ESC @
 
+    // Seleccionar code page CP850
+    bytes.addAll([0x1B, 0x74, 0x02]); // ESC t 2 = CP850
+
     // Bold ON + Center
     bytes.addAll([0x1B, 0x45, 0x01]);
     bytes.addAll([0x1B, 0x61, 0x01]);
-    bytes.addAll(utf8.encode('=== THERMAL_PRINTER_USB ===\n'));
+    bytes.addAll(_encodeCp850('=== THERMAL_PRINTER_USB ===\n'));
 
     // Bold OFF
     bytes.addAll([0x1B, 0x45, 0x00]);
-    bytes.addAll(utf8.encode('Página de prueba\n'));
-    bytes.addAll(utf8.encode('--------------------------------\n'));
+    bytes.addAll(_encodeCp850('Página de prueba\n'));
+    bytes.addAll(_encodeCp850('--------------------------------\n'));
 
     // Left align
     bytes.addAll([0x1B, 0x61, 0x00]);
     bytes.addAll(
-      utf8.encode(
+      _encodeCp850(
         'Dispositivo: ${_printer.connectedDevice?.productName ?? "?"}\n',
       ),
     );
     bytes.addAll(
-      utf8.encode('VID: ${_printer.connectedDevice?.vendorId ?? 0}\n'),
+      _encodeCp850('VID: ${_printer.connectedDevice?.vendorId ?? 0}\n'),
     );
     bytes.addAll(
-      utf8.encode('PID: ${_printer.connectedDevice?.productId ?? 0}\n'),
+      _encodeCp850('PID: ${_printer.connectedDevice?.productId ?? 0}\n'),
     );
 
     if (_status != null && _status!.supported) {
-      bytes.addAll(utf8.encode('--------------------------------\n'));
+      bytes.addAll(_encodeCp850('--------------------------------\n'));
       bytes.addAll(
-        utf8.encode('Papel: ${_status!.paperOk ? "OK" : "SIN PAPEL"}\n'),
+        _encodeCp850('Papel: ${_status!.paperOk ? "OK" : "SIN PAPEL"}\n'),
       );
       bytes.addAll(
-        utf8.encode('Tapa:  ${_status!.coverClosed ? "Cerrada" : "ABIERTA"}\n'),
+        _encodeCp850(
+          'Tapa:  ${_status!.coverClosed ? "Cerrada" : "ABIERTA"}\n',
+        ),
       );
-      bytes.addAll(utf8.encode('Estado: ${_status!.summaryText}\n'));
+      bytes.addAll(_encodeCp850('Estado: ${_status!.summaryText}\n'));
     }
 
-    bytes.addAll(utf8.encode('--------------------------------\n'));
+    bytes.addAll(_encodeCp850('--------------------------------\n'));
 
-    // Test de caracteres especiales UTF-8
+    // Test de caracteres especiales
     bytes.addAll([0x1B, 0x45, 0x01]); // Bold ON
-    bytes.addAll(utf8.encode('Test UTF-8:\n'));
+    bytes.addAll(_encodeCp850('Test CP850:\n'));
     bytes.addAll([0x1B, 0x45, 0x00]); // Bold OFF
-    bytes.addAll(utf8.encode('  Español: áéíóúñü ÁÉÍÓÚÑÜ\n'));
-    bytes.addAll(utf8.encode('  Símbolos: ¡ ¿ °C € £ ¥\n'));
-    bytes.addAll(utf8.encode('  Moneda: Bs. 1.250,00\n'));
-    bytes.addAll(utf8.encode('--------------------------------\n'));
+    bytes.addAll(_encodeCp850('  Español: áéíóúñü ÁÉÍÓÚÑÜ\n'));
+    bytes.addAll(_encodeCp850('  Símbolos: ¡Hola! ¿Qué tal?\n'));
+    bytes.addAll(_encodeCp850('  Moneda: Bs. 1.250,00\n'));
+    bytes.addAll(_encodeCp850('--------------------------------\n'));
 
     // Center + footer
     bytes.addAll([0x1B, 0x61, 0x01]);
-    bytes.addAll(utf8.encode('github.com/mazoku1999\n'));
-    bytes.addAll(utf8.encode('/thermal_printer_usb\n'));
+    bytes.addAll(_encodeCp850('github.com/mazoku1999\n'));
+    bytes.addAll(_encodeCp850('/thermal_printer_usb\n'));
 
     // Feed + cut
     bytes.addAll([0x0A, 0x0A, 0x0A]);
@@ -156,12 +198,14 @@ class _PrinterDemoScreenState extends State<PrinterDemoScreen> {
 
     final success = await _printer.printRaw(
       Uint8List.fromList(bytes),
-      description: 'test_page_utf8',
+      description: 'test_page_cp850',
     );
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(success ? '✅ UTF-8 test printed!' : '❌ Print failed'),
+          content: Text(
+            success ? '✅ Test CP850 impreso!' : '❌ Error al imprimir',
+          ),
           backgroundColor: success ? Colors.green : Colors.red,
         ),
       );
@@ -178,7 +222,7 @@ class _PrinterDemoScreenState extends State<PrinterDemoScreen> {
       final gen = Generator(PaperSize.mm80, profile);
       List<int> bytes = [];
 
-      bytes += gen.setGlobalCodeTable('CP1252');
+      bytes += gen.setGlobalCodeTable('CP850');
 
       // Encabezado
       bytes += gen.text(
