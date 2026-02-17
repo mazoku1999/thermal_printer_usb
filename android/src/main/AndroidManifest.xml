@@ -1,0 +1,7 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+  package="com.mazoku.thermal_printer_usb">
+
+    <!-- Merged automatically into the app's manifest by Android build tools -->
+    <uses-feature android:name="android.hardware.usb.host" android:required="false"/>
+
+</manifest>

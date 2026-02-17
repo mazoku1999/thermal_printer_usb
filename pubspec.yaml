@@ -1,0 +1,30 @@
+name: thermal_printer_usb
+description: >
+  Flutter plugin for USB thermal printers (ESC/POS). Discover, connect, print
+  raw bytes, read hardware status (DLE EOT), auto-reconnect, print queue with
+  retries, and paper alerts — all via native Android USB Host API.
+version: 1.0.0
+homepage: https://github.com/mazoku1999/thermal_printer_usb
+repository: https://github.com/mazoku1999/thermal_printer_usb
+issue_tracker: https://github.com/mazoku1999/thermal_printer_usb/issues
+
+environment:
+  sdk: ^3.10.4
+  flutter: '>=3.3.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  shared_preferences: ^2.2.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: com.mazoku.thermal_printer_usb
+        pluginClass: ThermalPrinterUsbPlugin
