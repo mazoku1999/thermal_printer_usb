@@ -143,7 +143,7 @@ final success = await printer.printRaw(
 await printer.printBytes(bytes, description: 'label');
 ```
 
-> **Tip:** Use [`flutter_esc_pos_utils`](https://pub.dev/packages/flutter_esc_pos_utils) or any ESC/POS library to generate the byte arrays. This plugin handles the raw USB transfer only.
+> **Tip:** You can use [`flutter_esc_pos_utils`](https://pub.dev/packages/flutter_esc_pos_utils) for formatting (bold, alignment, `hr()`, `cut()`), but its `setGlobalCodeTable()` does **not** reliably encode Spanish/accented characters on all printers. Use `encodeText()` for text content and the Generator only for formatting commands.
 
 ### Encode text for thermal printers
 
