@@ -16,6 +16,7 @@ Flutter plugin for **USB thermal printers** (ESC/POS) on Android. Discover, conn
 | 🔄 Auto-reconnect | Restores connection by VID/PID on re-plug |
 | 📋 Print queue | Failed jobs queued with 3 retries |
 | ⚠️ Paper alerts | Stream-based warnings before each print |
+| 🔤 Text encoding | Native charset conversion (CP850, CP437, CP1252, etc.) |
 | 📝 Structured logging | Circular buffer (100 entries), persisted to disk as JSON |
 | 🔌 Real connection check | Zero-byte bulk transfer to detect dead cables |
 | 🧩 Multiple instances | Custom channel support for multi-printer setups |
@@ -143,6 +144,44 @@ await printer.printBytes(bytes, description: 'label');
 ```
 
 > **Tip:** Use [`flutter_esc_pos_utils`](https://pub.dev/packages/flutter_esc_pos_utils) or any ESC/POS library to generate the byte arrays. This plugin handles the raw USB transfer only.
+
+### Encode text for thermal printers
+
+Thermal printers **do not understand UTF-8**. They use single-byte code pages like CP850. The plugin provides native charset encoding via `java.nio.charset.Charset` — complete and correct, no manual character maps needed:
+
+```dart
+// Encode Spanish text to CP850 (default)
+final bytes = await printer.encodeText('Hola ñáéíóú ¡Bienvenido!');
+
+// Use a different charset
+final bytes1252 = await printer.encodeText('Prix: 5€', charset: 'Cp1252');
+
+// Build a raw ticket with proper encoding
+final ticket = <int>[
+  0x1B, 0x40,             // ESC @ — Initialize
+  0x1B, 0x74, 0x02,       // ESC t 2 — Select CP850 code page
+  ...await printer.encodeText('Página de prueba\n'),
+  ...await printer.encodeText('Español: áéíóúñü ÁÉÍÓÚÑÜ\n'),
+  0x1D, 0x56, 0x00,       // Full cut
+];
+await printer.printRaw(Uint8List.fromList(ticket));
+```
+
+**Supported charsets:**
+
+| Charset | Description |
+|---------|-------------|
+| `Cp850` | **Default.** Western European (Spanish, Portuguese, French) |
+| `Cp437` | Original IBM PC. Box-drawing characters |
+| `Cp1252` | Windows Western European |
+| `ISO-8859-1` | Latin-1 |
+| `ISO-8859-15` | Latin-9 (adds € sign) |
+
+```dart
+// List all supported charsets on this device
+final charsets = await printer.getSupportedCharsets();
+print(charsets); // [Cp850, Cp437, Cp1252, ...]
+```
 
 ### Check printer status (DLE EOT)
 
@@ -342,6 +381,8 @@ final printer2 = ThermalPrinterUsb.custom(
 | `printBytes(bytes, {description})` | `Future<bool>` | Convenience wrapper for `List<int>` |
 | `getPrinterStatus()` | `Future<PrinterStatus>` | Read DLE EOT 2/3/4 status |
 | `checkRealConnection()` | `Future<bool>` | Zero-byte USB transfer to verify cable |
+| `encodeText(text, {charset})` | `Future<Uint8List>` | Encode Unicode → code page bytes (default: CP850) |
+| `getSupportedCharsets()` | `Future<List<String>>` | List available charset names |
 | `processQueue()` | `Future<void>` | Retry pending print jobs |
 | `clearQueue()` | `void` | Discard all queued jobs |
 | `clearLogs()` | `void` | Clear log history |
