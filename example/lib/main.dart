@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -91,47 +92,76 @@ class _PrinterDemoScreenState extends State<PrinterDemoScreen> {
     if (mounted) setState(() => _status = status);
   }
 
-  // ─── Raw bytes test (no extra dependencies) ───
+  // ─── Raw bytes test (UTF-8, no extra dependencies) ───
   Future<void> _printTestPage() async {
     final bytes = <int>[];
-    bytes.addAll([0x1B, 0x40]); // ESC @ — Initialize
-    bytes.addAll([0x1B, 0x45, 0x01]); // Bold ON
-    bytes.addAll([0x1B, 0x61, 0x01]); // Center
-    bytes.addAll('=== THERMAL_PRINTER_USB ===\n'.codeUnits);
-    bytes.addAll([0x1B, 0x45, 0x00]); // Bold OFF
-    bytes.addAll('Plugin Test Page\n'.codeUnits);
-    bytes.addAll('--------------------------------\n'.codeUnits);
-    bytes.addAll([0x1B, 0x61, 0x00]); // Left
+
+    // Initialize printer
+    bytes.addAll([0x1B, 0x40]); // ESC @
+
+    // Bold ON + Center
+    bytes.addAll([0x1B, 0x45, 0x01]);
+    bytes.addAll([0x1B, 0x61, 0x01]);
+    bytes.addAll(utf8.encode('=== THERMAL_PRINTER_USB ===\n'));
+
+    // Bold OFF
+    bytes.addAll([0x1B, 0x45, 0x00]);
+    bytes.addAll(utf8.encode('Página de prueba\n'));
+    bytes.addAll(utf8.encode('--------------------------------\n'));
+
+    // Left align
+    bytes.addAll([0x1B, 0x61, 0x00]);
     bytes.addAll(
-      'Device: ${_printer.connectedDevice?.productName ?? "?"}\n'.codeUnits,
+      utf8.encode(
+        'Dispositivo: ${_printer.connectedDevice?.productName ?? "?"}\n',
+      ),
     );
-    bytes.addAll('VID: ${_printer.connectedDevice?.vendorId ?? 0}\n'.codeUnits);
     bytes.addAll(
-      'PID: ${_printer.connectedDevice?.productId ?? 0}\n'.codeUnits,
+      utf8.encode('VID: ${_printer.connectedDevice?.vendorId ?? 0}\n'),
     );
+    bytes.addAll(
+      utf8.encode('PID: ${_printer.connectedDevice?.productId ?? 0}\n'),
+    );
+
     if (_status != null && _status!.supported) {
-      bytes.addAll('--------------------------------\n'.codeUnits);
-      bytes.addAll('Paper: ${_status!.paperOk ? "OK" : "EMPTY"}\n'.codeUnits);
+      bytes.addAll(utf8.encode('--------------------------------\n'));
       bytes.addAll(
-        'Cover:  ${_status!.coverClosed ? "Closed" : "OPEN"}\n'.codeUnits,
+        utf8.encode('Papel: ${_status!.paperOk ? "OK" : "SIN PAPEL"}\n'),
       );
-      bytes.addAll('Status: ${_status!.summaryText}\n'.codeUnits);
+      bytes.addAll(
+        utf8.encode('Tapa:  ${_status!.coverClosed ? "Cerrada" : "ABIERTA"}\n'),
+      );
+      bytes.addAll(utf8.encode('Estado: ${_status!.summaryText}\n'));
     }
-    bytes.addAll('--------------------------------\n'.codeUnits);
-    bytes.addAll([0x1B, 0x61, 0x01]); // Center
-    bytes.addAll('github.com/mazoku1999\n'.codeUnits);
-    bytes.addAll('/thermal_printer_usb\n'.codeUnits);
-    bytes.addAll([0x0A, 0x0A, 0x0A]); // Feed
+
+    bytes.addAll(utf8.encode('--------------------------------\n'));
+
+    // Test de caracteres especiales UTF-8
+    bytes.addAll([0x1B, 0x45, 0x01]); // Bold ON
+    bytes.addAll(utf8.encode('Test UTF-8:\n'));
+    bytes.addAll([0x1B, 0x45, 0x00]); // Bold OFF
+    bytes.addAll(utf8.encode('  Español: áéíóúñü ÁÉÍÓÚÑÜ\n'));
+    bytes.addAll(utf8.encode('  Símbolos: ¡ ¿ °C € £ ¥\n'));
+    bytes.addAll(utf8.encode('  Moneda: Bs. 1.250,00\n'));
+    bytes.addAll(utf8.encode('--------------------------------\n'));
+
+    // Center + footer
+    bytes.addAll([0x1B, 0x61, 0x01]);
+    bytes.addAll(utf8.encode('github.com/mazoku1999\n'));
+    bytes.addAll(utf8.encode('/thermal_printer_usb\n'));
+
+    // Feed + cut
+    bytes.addAll([0x0A, 0x0A, 0x0A]);
     bytes.addAll([0x1D, 0x56, 0x00]); // GS V 0 (full cut)
 
     final success = await _printer.printRaw(
       Uint8List.fromList(bytes),
-      description: 'test_page_raw',
+      description: 'test_page_utf8',
     );
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(success ? '✅ Raw test printed!' : '❌ Print failed'),
+          content: Text(success ? '✅ UTF-8 test printed!' : '❌ Print failed'),
           backgroundColor: success ? Colors.green : Colors.red,
         ),
       );
