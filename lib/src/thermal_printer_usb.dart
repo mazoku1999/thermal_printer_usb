@@ -646,6 +646,68 @@ class ThermalPrinterUsb {
     return printRaw(Uint8List.fromList(bytes), description: description);
   }
 
+  // ─────────── Text encoding ───────────
+
+  /// Encode a Unicode string into printer-compatible bytes using a native charset.
+  ///
+  /// Thermal printers do **not** understand UTF-8. They use single-byte code
+  /// pages like CP850, CP437, or CP1252. This method uses the Android platform's
+  /// `java.nio.charset.Charset` to perform complete, correct encoding — no
+  /// manual character maps needed.
+  ///
+  /// ## Common charsets:
+  /// | Charset | Description |
+  /// |---------|-------------|
+  /// | `Cp850` | **Default.** Western European (Spanish, French, Portuguese). |
+  /// | `Cp437` | Original IBM PC. Good for box-drawing characters. |
+  /// | `Cp1252` | Windows Western European. |
+  /// | `ISO-8859-1` | Latin-1. |
+  /// | `ISO-8859-15` | Latin-9 (adds € sign). |
+  ///
+  /// ```dart
+  /// // Encode Spanish text to CP850 for raw printing
+  /// final bytes = await printer.encodeText('Hola ñáéíóú ¡¿');
+  ///
+  /// // Or use a different charset
+  /// final bytes1252 = await printer.encodeText('Hello €', charset: 'Cp1252');
+  /// ```
+  ///
+  /// Returns the encoded bytes, or an empty [Uint8List] if encoding fails.
+  Future<Uint8List> encodeText(String text, {String charset = 'Cp850'}) async {
+    try {
+      final result = await _channel.invokeMethod<dynamic>('encodeText', {
+        'text': text,
+        'charset': charset,
+      });
+      if (result is Uint8List) return result;
+      if (result is List) return Uint8List.fromList(result.cast<int>());
+      return Uint8List(0);
+    } catch (e) {
+      debugPrint('ThermalPrinterUsb: encodeText error: $e');
+      return Uint8List(0);
+    }
+  }
+
+  /// List the charsets supported by the native platform.
+  ///
+  /// Useful for letting users pick the right encoding for their printer model.
+  ///
+  /// ```dart
+  /// final charsets = await printer.getSupportedCharsets();
+  /// print(charsets); // [Cp850, Cp437, Cp1252, ...]
+  /// ```
+  Future<List<String>> getSupportedCharsets() async {
+    try {
+      final result = await _channel.invokeMethod<List<dynamic>>(
+        'getSupportedCharsets',
+      );
+      return result?.cast<String>() ?? [];
+    } catch (e) {
+      debugPrint('ThermalPrinterUsb: getSupportedCharsets error: $e');
+      return [];
+    }
+  }
+
   /// Check paper before printing and emit warning if needed.
   Future<void> _checkPaperBeforePrint() async {
     try {

@@ -1,5 +1,7 @@
 package com.mazoku.thermal_printer_usb
 
+import java.nio.charset.Charset
+
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -108,6 +110,16 @@ class ThermalPrinterUsbPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             }
             "isConnected" -> checkRealConnection(result)
             "getPrinterStatus" -> getPrinterStatus(result)
+            "encodeText" -> {
+                val text = call.argument<String>("text")
+                val charset = call.argument<String>("charset") ?: "Cp850"
+                if (text != null) {
+                    encodeText(text, charset, result)
+                } else {
+                    result.error("INVALID_ARGS", "text required", null)
+                }
+            }
+            "getSupportedCharsets" -> getSupportedCharsets(result)
             else -> result.notImplemented()
         }
     }
@@ -627,5 +639,55 @@ class ThermalPrinterUsbPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 "productId" to device.productId
             ))
         }
+    }
+
+    // ═══════════════════════════════════════════════════════
+    //  Text encoding (charset conversion)
+    // ═══════════════════════════════════════════════════════
+
+    /**
+     * Encodes a Unicode string into the specified charset's byte representation.
+     *
+     * Thermal printers do NOT understand UTF-8. They use single-byte code pages
+     * like CP850, CP437, or CP1252. Java's [Charset] provides complete, correct
+     * encoding for all these code pages — no manual character maps needed.
+     *
+     * Common charsets for thermal printers:
+     *   - `Cp850` — Western European (Spanish, French, Portuguese). Default.
+     *   - `Cp437` — Original IBM PC. Good for box-drawing characters.
+     *   - `Cp1252` — Windows Western European.
+     *   - `ISO-8859-1` — Latin-1.
+     *   - `ISO-8859-15` — Latin-9 (adds € sign).
+     */
+    private fun encodeText(text: String, charsetName: String, result: MethodChannel.Result) {
+        try {
+            val charset = Charset.forName(charsetName)
+            val encoded = text.toByteArray(charset)
+            result.success(encoded)
+        } catch (e: java.nio.charset.UnsupportedCharsetException) {
+            result.error(
+                "UNSUPPORTED_CHARSET",
+                "Charset '$charsetName' is not supported. Use getSupportedCharsets() to list available charsets.",
+                null
+            )
+        } catch (e: Exception) {
+            result.error("ENCODE_ERROR", "Encoding error: \${e.message}", null)
+        }
+    }
+
+    /**
+     * Returns a list of common charsets supported by this device.
+     * Useful for letting the user pick the right encoding for their printer.
+     */
+    private fun getSupportedCharsets(result: MethodChannel.Result) {
+        val common = listOf(
+            "Cp850", "Cp437", "Cp1252", "Cp858",
+            "ISO-8859-1", "ISO-8859-15",
+            "US-ASCII", "UTF-8"
+        )
+        val supported = common.filter {
+            try { Charset.isSupported(it) } catch (_: Exception) { false }
+        }
+        result.success(supported)
     }
 }
