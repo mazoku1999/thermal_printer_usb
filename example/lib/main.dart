@@ -251,7 +251,8 @@ class _PrinterDemoScreenState extends State<PrinterDemoScreen> {
       bytes += gen.text('  ABCDEFGHIJKLMNOPQRSTUVWXYZ');
       bytes += gen.text('  abcdefghijklmnopqrstuvwxyz');
       bytes += gen.text('  0123456789');
-      bytes += gen.text('  Espanol: aeiou nN');
+      bytes += gen.text('  Español: áéíóúñü ÁÉÍÓÚÑÜ');
+      bytes += gen.text('  Símbolos: ¡Hola! ¿Qué tal? °C');
       bytes += gen.text('  Moneda: Bs. 1.250,00');
       bytes += gen.hr();
 
