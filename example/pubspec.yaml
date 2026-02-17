@@ -25,6 +25,9 @@ dependencies:
     # the parent directory to use the current plugin's version.
     path: ../
 
+  # ESC/POS formatting library — demonstrates how to build formatted tickets
+  flutter_esc_pos_utils: ^1.0.1
+
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8

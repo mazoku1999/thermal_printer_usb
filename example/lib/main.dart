@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_esc_pos_utils/flutter_esc_pos_utils.dart';
 import 'package:thermal_printer_usb/thermal_printer_usb.dart';
 
 void main() async {
@@ -90,28 +91,17 @@ class _PrinterDemoScreenState extends State<PrinterDemoScreen> {
     if (mounted) setState(() => _status = status);
   }
 
+  // ─── Raw bytes test (no extra dependencies) ───
   Future<void> _printTestPage() async {
-    // Build a simple ESC/POS test page using raw bytes
     final bytes = <int>[];
-
-    // Initialize printer
-    bytes.addAll([0x1B, 0x40]); // ESC @
-
-    // Bold ON
-    bytes.addAll([0x1B, 0x45, 0x01]);
-    // Center align
-    bytes.addAll([0x1B, 0x61, 0x01]);
-
-    // Title
+    bytes.addAll([0x1B, 0x40]); // ESC @ — Initialize
+    bytes.addAll([0x1B, 0x45, 0x01]); // Bold ON
+    bytes.addAll([0x1B, 0x61, 0x01]); // Center
     bytes.addAll('=== THERMAL_PRINTER_USB ===\n'.codeUnits);
-
-    // Bold OFF
-    bytes.addAll([0x1B, 0x45, 0x00]);
+    bytes.addAll([0x1B, 0x45, 0x00]); // Bold OFF
     bytes.addAll('Plugin Test Page\n'.codeUnits);
     bytes.addAll('--------------------------------\n'.codeUnits);
-
-    // Left align
-    bytes.addAll([0x1B, 0x61, 0x00]);
+    bytes.addAll([0x1B, 0x61, 0x00]); // Left
     bytes.addAll(
       'Device: ${_printer.connectedDevice?.productName ?? "?"}\n'.codeUnits,
     );
@@ -119,7 +109,6 @@ class _PrinterDemoScreenState extends State<PrinterDemoScreen> {
     bytes.addAll(
       'PID: ${_printer.connectedDevice?.productId ?? 0}\n'.codeUnits,
     );
-
     if (_status != null && _status!.supported) {
       bytes.addAll('--------------------------------\n'.codeUnits);
       bytes.addAll('Paper: ${_status!.paperOk ? "OK" : "EMPTY"}\n'.codeUnits);
@@ -128,31 +117,154 @@ class _PrinterDemoScreenState extends State<PrinterDemoScreen> {
       );
       bytes.addAll('Status: ${_status!.summaryText}\n'.codeUnits);
     }
-
     bytes.addAll('--------------------------------\n'.codeUnits);
-
-    // Center align
-    bytes.addAll([0x1B, 0x61, 0x01]);
+    bytes.addAll([0x1B, 0x61, 0x01]); // Center
     bytes.addAll('github.com/mazoku1999\n'.codeUnits);
     bytes.addAll('/thermal_printer_usb\n'.codeUnits);
-
-    // Feed + cut
-    bytes.addAll([0x0A, 0x0A, 0x0A]);
+    bytes.addAll([0x0A, 0x0A, 0x0A]); // Feed
     bytes.addAll([0x1D, 0x56, 0x00]); // GS V 0 (full cut)
 
     final success = await _printer.printRaw(
       Uint8List.fromList(bytes),
-      description: 'test_page',
+      description: 'test_page_raw',
     );
-
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(success ? '✅ Test page printed!' : '❌ Print failed'),
+          content: Text(success ? '✅ Raw test printed!' : '❌ Print failed'),
           backgroundColor: success ? Colors.green : Colors.red,
         ),
       );
     }
+  }
+
+  // ─── Diagnostic ticket using flutter_esc_pos_utils ───
+  //
+  // This demonstrates how to use the Generator class to build
+  // a real formatted ticket with styles, code tables, and cuts.
+  Future<void> _printDiagnosticTicket() async {
+    try {
+      final profile = await CapabilityProfile.load();
+      final gen = Generator(PaperSize.mm80, profile);
+      List<int> bytes = [];
+
+      bytes += gen.setGlobalCodeTable('CP1252');
+
+      // Header
+      bytes += gen.text(
+        '=== DIAGNOSTIC TICKET ===',
+        styles: const PosStyles(
+          align: PosAlign.center,
+          bold: true,
+          height: PosTextSize.size2,
+          width: PosTextSize.size1,
+        ),
+      );
+      bytes += gen.hr();
+
+      // Device info
+      bytes += gen.text('Printer:', styles: const PosStyles(bold: true));
+      bytes += gen.text(
+        '  ${_printer.connectedDevice?.productName ?? "Unknown"}',
+      );
+      bytes += gen.text('  VID: ${_printer.connectedDevice?.vendorId ?? 0}');
+      bytes += gen.text('  PID: ${_printer.connectedDevice?.productId ?? 0}');
+      bytes += gen.text(
+        '  Mfr: ${_printer.connectedDevice?.manufacturerName ?? "N/A"}',
+      );
+      bytes += gen.hr();
+
+      // Configuration
+      bytes += gen.text('Configuration:', styles: const PosStyles(bold: true));
+      bytes += gen.text('  Paper width: 80mm');
+      bytes += gen.text('  Date: ${_formatDate(DateTime.now())}');
+      bytes += gen.hr();
+
+      // Live status
+      final status = await _printer.getPrinterStatus();
+      if (mounted) setState(() => _status = status);
+
+      bytes += gen.text('Status:', styles: const PosStyles(bold: true));
+      bytes += gen.text(
+        '  Supports status: ${status.supported ? "Yes" : "No"}',
+      );
+      if (status.supported) {
+        bytes += gen.text('  Paper: ${status.paperOk ? "OK" : "EMPTY"}');
+        if (status.paperNearEnd) bytes += gen.text('  >> Paper near end');
+        bytes += gen.text('  Cover: ${status.coverClosed ? "Closed" : "OPEN"}');
+        bytes += gen.text('  Online: ${status.online ? "Yes" : "No"}');
+        if (status.autoCutterError) bytes += gen.text('  >> Cutter error');
+        if (status.unrecoverableError) {
+          bytes += gen.text('  >> Unrecoverable error');
+        }
+        if (status.autoRecoverableError) {
+          bytes += gen.text('  >> Auto-recoverable error');
+        }
+        bytes += gen.text('  Summary: ${status.summaryText}');
+      }
+      bytes += gen.hr();
+
+      // Print queue
+      bytes += gen.text('Queue:', styles: const PosStyles(bold: true));
+      bytes += gen.text('  Pending jobs: ${_printer.pendingJobCount}');
+      bytes += gen.hr();
+
+      // Character test
+      bytes += gen.text('Character test:', styles: const PosStyles(bold: true));
+      bytes += gen.text('  ABCDEFGHIJKLMNOPQRSTUVWXYZ');
+      bytes += gen.text('  abcdefghijklmnopqrstuvwxyz');
+      bytes += gen.text('  0123456789');
+      bytes += gen.text('  100.50 - Total: 1,250.00');
+      bytes += gen.hr();
+
+      // Partial cut
+      bytes += gen.text(
+        '--- PARTIAL CUT ---',
+        styles: const PosStyles(align: PosAlign.center),
+      );
+      bytes += gen.feed(2);
+      bytes += gen.cut(mode: PosCutMode.partial);
+
+      // Full cut
+      bytes += gen.text(
+        '--- FULL CUT ---',
+        styles: const PosStyles(align: PosAlign.center),
+      );
+      bytes += gen.feed(3);
+      bytes += gen.cut();
+
+      final success = await _printer.printBytes(
+        bytes,
+        description: 'diagnostic_ticket',
+      );
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              success
+                  ? '✅ Diagnostic ticket printed!'
+                  : '❌ Print failed — check connection',
+            ),
+            backgroundColor: success ? Colors.green : Colors.red,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('❌ Error: $e'), backgroundColor: Colors.red),
+        );
+      }
+    }
+  }
+
+  String _formatDate(DateTime date) {
+    return '${date.day.toString().padLeft(2, '0')}/'
+        '${date.month.toString().padLeft(2, '0')}/'
+        '${date.year} '
+        '${date.hour.toString().padLeft(2, '0')}:'
+        '${date.minute.toString().padLeft(2, '0')}';
   }
 
   @override
@@ -328,10 +440,22 @@ class _PrinterDemoScreenState extends State<PrinterDemoScreen> {
                   child: FilledButton.icon(
                     onPressed: _printTestPage,
                     icon: const Icon(Icons.print),
-                    label: const Text('Print Test Page'),
+                    label: const Text('Raw Test'),
                   ),
                 ),
               ],
+            ),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                onPressed: _printDiagnosticTicket,
+                icon: const Icon(Icons.receipt_long),
+                label: const Text('Diagnostic Ticket (esc_pos_utils)'),
+                style: FilledButton.styleFrom(
+                  backgroundColor: Colors.deepPurple,
+                ),
+              ),
             ),
             const SizedBox(height: 24),
           ],
