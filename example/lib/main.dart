@@ -180,9 +180,9 @@ class _PrinterDemoScreenState extends State<PrinterDemoScreen> {
 
       bytes += gen.setGlobalCodeTable('CP1252');
 
-      // Header
+      // Encabezado
       bytes += gen.text(
-        '=== DIAGNOSTIC TICKET ===',
+        '=== TICKET DIAGNOSTICO ===',
         styles: const PosStyles(
           align: PosAlign.center,
           bold: true,
@@ -192,72 +192,80 @@ class _PrinterDemoScreenState extends State<PrinterDemoScreen> {
       );
       bytes += gen.hr();
 
-      // Device info
-      bytes += gen.text('Printer:', styles: const PosStyles(bold: true));
+      // Info del dispositivo
+      bytes += gen.text('Impresora:', styles: const PosStyles(bold: true));
       bytes += gen.text(
-        '  ${_printer.connectedDevice?.productName ?? "Unknown"}',
+        '  ${_printer.connectedDevice?.productName ?? "Desconocida"}',
       );
       bytes += gen.text('  VID: ${_printer.connectedDevice?.vendorId ?? 0}');
       bytes += gen.text('  PID: ${_printer.connectedDevice?.productId ?? 0}');
       bytes += gen.text(
-        '  Mfr: ${_printer.connectedDevice?.manufacturerName ?? "N/A"}',
+        '  Fabricante: ${_printer.connectedDevice?.manufacturerName ?? "N/A"}',
       );
       bytes += gen.hr();
 
-      // Configuration
-      bytes += gen.text('Configuration:', styles: const PosStyles(bold: true));
-      bytes += gen.text('  Paper width: 80mm');
-      bytes += gen.text('  Date: ${_formatDate(DateTime.now())}');
+      // Configuracion
+      bytes += gen.text('Configuracion:', styles: const PosStyles(bold: true));
+      bytes += gen.text('  Ancho de papel: 80mm');
+      bytes += gen.text('  Fecha: ${_formatDate(DateTime.now())}');
       bytes += gen.hr();
 
-      // Live status
+      // Status en vivo
       final status = await _printer.getPrinterStatus();
       if (mounted) setState(() => _status = status);
 
-      bytes += gen.text('Status:', styles: const PosStyles(bold: true));
-      bytes += gen.text(
-        '  Supports status: ${status.supported ? "Yes" : "No"}',
-      );
+      bytes += gen.text('Estado:', styles: const PosStyles(bold: true));
+      bytes += gen.text('  Soporta status: ${status.supported ? "Si" : "No"}');
       if (status.supported) {
-        bytes += gen.text('  Paper: ${status.paperOk ? "OK" : "EMPTY"}');
-        if (status.paperNearEnd) bytes += gen.text('  >> Paper near end');
-        bytes += gen.text('  Cover: ${status.coverClosed ? "Closed" : "OPEN"}');
-        bytes += gen.text('  Online: ${status.online ? "Yes" : "No"}');
-        if (status.autoCutterError) bytes += gen.text('  >> Cutter error');
+        bytes += gen.text('  Papel: ${status.paperOk ? "OK" : "SIN PAPEL"}');
+        if (status.paperNearEnd) {
+          bytes += gen.text('  >> Papel por acabarse');
+        }
+        bytes += gen.text(
+          '  Tapa: ${status.coverClosed ? "Cerrada" : "ABIERTA"}',
+        );
+        bytes += gen.text('  Online: ${status.online ? "Si" : "No"}');
+        if (status.autoCutterError) {
+          bytes += gen.text('  >> Error cuchilla');
+        }
         if (status.unrecoverableError) {
-          bytes += gen.text('  >> Unrecoverable error');
+          bytes += gen.text('  >> Error irrecuperable');
         }
         if (status.autoRecoverableError) {
-          bytes += gen.text('  >> Auto-recoverable error');
+          bytes += gen.text('  >> Error auto-recuperable');
         }
-        bytes += gen.text('  Summary: ${status.summaryText}');
+        bytes += gen.text('  Resumen: ${status.summaryText}');
       }
       bytes += gen.hr();
 
-      // Print queue
-      bytes += gen.text('Queue:', styles: const PosStyles(bold: true));
-      bytes += gen.text('  Pending jobs: ${_printer.pendingJobCount}');
+      // Cola de impresion
+      bytes += gen.text('Cola:', styles: const PosStyles(bold: true));
+      bytes += gen.text('  Pendientes: ${_printer.pendingJobCount}');
       bytes += gen.hr();
 
-      // Character test
-      bytes += gen.text('Character test:', styles: const PosStyles(bold: true));
+      // Test de caracteres
+      bytes += gen.text(
+        'Test de caracteres:',
+        styles: const PosStyles(bold: true),
+      );
       bytes += gen.text('  ABCDEFGHIJKLMNOPQRSTUVWXYZ');
       bytes += gen.text('  abcdefghijklmnopqrstuvwxyz');
       bytes += gen.text('  0123456789');
-      bytes += gen.text('  100.50 - Total: 1,250.00');
+      bytes += gen.text('  Espanol: aeiou nN');
+      bytes += gen.text('  Moneda: Bs. 1.250,00');
       bytes += gen.hr();
 
-      // Partial cut
+      // Corte parcial
       bytes += gen.text(
-        '--- PARTIAL CUT ---',
+        '--- CORTE PARCIAL ---',
         styles: const PosStyles(align: PosAlign.center),
       );
       bytes += gen.feed(2);
       bytes += gen.cut(mode: PosCutMode.partial);
 
-      // Full cut
+      // Corte total
       bytes += gen.text(
-        '--- FULL CUT ---',
+        '--- CORTE TOTAL ---',
         styles: const PosStyles(align: PosAlign.center),
       );
       bytes += gen.feed(3);
