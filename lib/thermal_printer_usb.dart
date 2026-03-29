@@ -30,3 +30,4 @@ export 'src/models/usb_device.dart';
 export 'src/models/printer_status.dart';
 export 'src/models/print_job.dart';
 export 'src/models/printer_log.dart';
+export 'src/models/printer_alert.dart';

@@ -61,6 +61,10 @@ class ThermalPrinterUsbPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     private var endpointIn: UsbEndpoint? = null
     private var connectedDevice: UsbDevice? = null
 
+    // Single-thread executor for ALL USB I/O — never blocks the UI thread
+    private val usbExecutor: java.util.concurrent.ExecutorService =
+        java.util.concurrent.Executors.newSingleThreadExecutor()
+
     // Event sink for broadcasting USB events
     private var globalEventSink: EventChannel.EventSink? = null
 
@@ -270,7 +274,10 @@ class ThermalPrinterUsbPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
 
             val permissionIntent = PendingIntent.getBroadcast(
                 context, 0, intent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
+                else
+                    PendingIntent.FLAG_UPDATE_CURRENT
             )
 
             val filter = IntentFilter(ACTION_USB_PERMISSION)
@@ -352,6 +359,8 @@ class ThermalPrinterUsbPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             endpointIn = foundEndpointIn
             connectedDevice = device
 
+
+
             result.success(mapOf(
                 "success" to true,
                 "deviceName" to (device.productName ?: "USB Printer"),
@@ -390,16 +399,21 @@ class ThermalPrinterUsbPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     // ═══════════════════════════════════════════════════
 
     /**
-     * Verifies the USB connection is actually alive by attempting a zero-byte
-     * bulk transfer. This catches physically disconnected cables that didn't
-     * trigger a system detach event.
+     * Verifies the USB connection is actually alive by sending a DLE EOT 1
+     * status query. This is more reliable than a zero-byte bulk transfer,
+     * which returns -1 on printer error states (no paper, cover open) even
+     * when the connection is physically fine.
+     *
+     * DLE EOT 1 always returns 1 byte regardless of printer error state.
+     * No response = truly disconnected.
      */
     private fun checkRealConnection(result: MethodChannel.Result) {
         val conn = connection
-        val ep = endpointOut
+        val epOut = endpointOut
+        val epIn = endpointIn
         val device = connectedDevice
 
-        if (conn == null || ep == null || device == null) {
+        if (conn == null || epOut == null || device == null) {
             result.success(mapOf(
                 "connected" to false,
                 "vendorId" to 0,
@@ -408,30 +422,46 @@ class ThermalPrinterUsbPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             return
         }
 
-        try {
-            val testResult = conn.bulkTransfer(ep, ByteArray(0), 0, 1000)
-            if (testResult < 0) {
+        usbExecutor.execute {
+            try {
+                val cmd = byteArrayOf(0x10, 0x04, 0x01)
+                val sent = conn.bulkTransfer(epOut, cmd, cmd.size, 300)
+
+                if (sent < 0) {
+                    cleanupConnection()
+                    Handler(Looper.getMainLooper()).post {
+                        result.success(mapOf(
+                            "connected" to false,
+                            "vendorId" to device.vendorId,
+                            "productId" to device.productId
+                        ))
+                    }
+                    return@execute
+                }
+
+                if (epIn != null) {
+                    val buffer = ByteArray(4)
+                    conn.bulkTransfer(epIn, buffer, buffer.size, 300)
+                }
+
+                Handler(Looper.getMainLooper()).post {
+                    result.success(mapOf(
+                        "connected" to true,
+                        "vendorId" to device.vendorId,
+                        "productId" to device.productId,
+                        "deviceName" to (device.productName ?: "USB Printer")
+                    ))
+                }
+            } catch (e: Exception) {
                 cleanupConnection()
-                result.success(mapOf(
-                    "connected" to false,
-                    "vendorId" to device.vendorId,
-                    "productId" to device.productId
-                ))
-            } else {
-                result.success(mapOf(
-                    "connected" to true,
-                    "vendorId" to device.vendorId,
-                    "productId" to device.productId,
-                    "deviceName" to (device.productName ?: "USB Printer")
-                ))
+                Handler(Looper.getMainLooper()).post {
+                    result.success(mapOf(
+                        "connected" to false,
+                        "vendorId" to device.vendorId,
+                        "productId" to device.productId
+                    ))
+                }
             }
-        } catch (e: Exception) {
-            cleanupConnection()
-            result.success(mapOf(
-                "connected" to false,
-                "vendorId" to device.vendorId,
-                "productId" to device.productId
-            ))
         }
     }
 
@@ -464,37 +494,54 @@ class ThermalPrinterUsbPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         val epOut = endpointOut
         val epIn = endpointIn
 
+        // Run on shared USB background thread
+        usbExecutor.execute {
+            getPrinterStatusWorker(conn, epOut, epIn, result)
+        }
+    }
+
+    private fun getPrinterStatusWorker(
+        conn: android.hardware.usb.UsbDeviceConnection?,
+        epOut: UsbEndpoint?,
+        epIn: UsbEndpoint?,
+        result: MethodChannel.Result
+    ) {
+
         if (conn == null || epOut == null) {
-            result.success(mapOf(
-                "supported" to false,
-                "paperOk" to true,
-                "paperNearEnd" to false,
-                "coverClosed" to true,
-                "online" to true,
-                "feedButtonPressed" to false,
-                "printingErrorStopped" to false,
-                "errorOccurred" to false,
-                "autoCutterError" to false,
-                "unrecoverableError" to false,
-                "autoRecoverableError" to false
-            ))
+            Handler(Looper.getMainLooper()).post {
+                result.success(mapOf(
+                    "supported" to false,
+                    "paperOk" to true,
+                    "paperNearEnd" to false,
+                    "coverClosed" to true,
+                    "online" to true,
+                    "feedButtonPressed" to false,
+                    "printingErrorStopped" to false,
+                    "errorOccurred" to false,
+                    "autoCutterError" to false,
+                    "unrecoverableError" to false,
+                    "autoRecoverableError" to false
+                ))
+            }
             return
         }
 
         if (epIn == null) {
-            result.success(mapOf(
-                "supported" to false,
-                "paperOk" to true,
-                "paperNearEnd" to false,
-                "coverClosed" to true,
-                "online" to true,
-                "feedButtonPressed" to false,
-                "printingErrorStopped" to false,
-                "errorOccurred" to false,
-                "autoCutterError" to false,
-                "unrecoverableError" to false,
-                "autoRecoverableError" to false
-            ))
+            Handler(Looper.getMainLooper()).post {
+                result.success(mapOf(
+                    "supported" to false,
+                    "paperOk" to true,
+                    "paperNearEnd" to false,
+                    "coverClosed" to true,
+                    "online" to true,
+                    "feedButtonPressed" to false,
+                    "printingErrorStopped" to false,
+                    "errorOccurred" to false,
+                    "autoCutterError" to false,
+                    "unrecoverableError" to false,
+                    "autoRecoverableError" to false
+                ))
+            }
             return
         }
 
@@ -513,11 +560,23 @@ class ThermalPrinterUsbPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             "autoRecoverableError" to false
         )
 
+        // Flush any stale data from IN endpoint before status queries
+        try {
+            val flush = ByteArray(64)
+            @Suppress("UNUSED_VARIABLE")
+            val flushed = conn!!.bulkTransfer(epIn, flush, flush.size, 100)
+            if (flushed > 0) {
+                android.util.Log.d("ThermalPrinterUsb", "STATUS: flushed $flushed stale bytes")
+            }
+        } catch (_: Exception) {}
+
         // ─── DLE EOT 2: Offline cause ───
         try {
             val cmd2 = byteArrayOf(0x10, 0x04, 0x02)
-            conn.bulkTransfer(epOut, cmd2, cmd2.size, 1500)
-            val recv2 = conn.bulkTransfer(epIn, buffer, buffer.size, 1500)
+            val sent2 = conn!!.bulkTransfer(epOut, cmd2, cmd2.size, 500)
+            android.util.Log.d("ThermalPrinterUsb", "STATUS DLE EOT 2: sent=$sent2")
+            val recv2 = conn.bulkTransfer(epIn, buffer, buffer.size, 500)
+            android.util.Log.d("ThermalPrinterUsb", "STATUS DLE EOT 2: recv=$recv2 raw=${if (recv2 > 0) "0x${String.format("%02X", buffer[0])}" else "none"}")
             if (recv2 > 0) {
                 val s = buffer[0].toInt()
                 statusResult["coverClosed"] = (s and 0x04) == 0
@@ -526,13 +585,17 @@ class ThermalPrinterUsbPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 statusResult["errorOccurred"] = (s and 0x40) != 0
                 statusResult["rawOffline"] = s
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            android.util.Log.e("ThermalPrinterUsb", "STATUS DLE EOT 2 error: ${e.message}")
+        }
 
         // ─── DLE EOT 3: Error status ───
         try {
             val cmd3 = byteArrayOf(0x10, 0x04, 0x03)
-            conn.bulkTransfer(epOut, cmd3, cmd3.size, 1500)
-            val recv3 = conn.bulkTransfer(epIn, buffer, buffer.size, 1500)
+            val sent3 = conn!!.bulkTransfer(epOut, cmd3, cmd3.size, 500)
+            android.util.Log.d("ThermalPrinterUsb", "STATUS DLE EOT 3: sent=$sent3")
+            val recv3 = conn.bulkTransfer(epIn, buffer, buffer.size, 500)
+            android.util.Log.d("ThermalPrinterUsb", "STATUS DLE EOT 3: recv=$recv3 raw=${if (recv3 > 0) "0x${String.format("%02X", buffer[0])}" else "none"}")
             if (recv3 > 0) {
                 val s = buffer[0].toInt()
                 statusResult["autoCutterError"] = (s and 0x04) != 0
@@ -540,13 +603,17 @@ class ThermalPrinterUsbPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 statusResult["autoRecoverableError"] = (s and 0x20) != 0
                 statusResult["rawError"] = s
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            android.util.Log.e("ThermalPrinterUsb", "STATUS DLE EOT 3 error: ${e.message}")
+        }
 
         // ─── DLE EOT 4: Paper sensor status ───
         try {
             val cmd4 = byteArrayOf(0x10, 0x04, 0x04)
-            conn.bulkTransfer(epOut, cmd4, cmd4.size, 1500)
-            val recv4 = conn.bulkTransfer(epIn, buffer, buffer.size, 1500)
+            val sent4 = conn!!.bulkTransfer(epOut, cmd4, cmd4.size, 500)
+            android.util.Log.d("ThermalPrinterUsb", "STATUS DLE EOT 4: sent=$sent4")
+            val recv4 = conn.bulkTransfer(epIn, buffer, buffer.size, 500)
+            android.util.Log.d("ThermalPrinterUsb", "STATUS DLE EOT 4: recv=$recv4 raw=${if (recv4 > 0) "0x${String.format("%02X", buffer[0])}" else "none"}")
             if (recv4 > 0) {
                 val s = buffer[0].toInt()
                 val nearEnd = (s and 0x0C) != 0
@@ -554,30 +621,35 @@ class ThermalPrinterUsbPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 statusResult["paperNearEnd"] = nearEnd
                 statusResult["paperOk"] = !noPaper
                 statusResult["rawPaper"] = s
+                android.util.Log.d("ThermalPrinterUsb", "STATUS PAPER: nearEnd=$nearEnd noPaper=$noPaper rawByte=0x${String.format("%02X", s)}")
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            android.util.Log.e("ThermalPrinterUsb", "STATUS DLE EOT 4 error: ${e.message}")
+        }
 
         // Derive online: if there are serious errors, printer is offline
         val hasError = statusResult["printingErrorStopped"] == true ||
                 statusResult["unrecoverableError"] == true
         statusResult["online"] = !hasError
 
-        try {
-            result.success(statusResult)
-        } catch (_: Exception) {
-            result.success(mapOf(
-                "supported" to false,
-                "paperOk" to true,
-                "paperNearEnd" to false,
-                "coverClosed" to true,
-                "online" to true,
-                "feedButtonPressed" to false,
-                "printingErrorStopped" to false,
-                "errorOccurred" to false,
-                "autoCutterError" to false,
-                "unrecoverableError" to false,
-                "autoRecoverableError" to false
-            ))
+        Handler(Looper.getMainLooper()).post {
+            try {
+                result.success(statusResult)
+            } catch (_: Exception) {
+                result.success(mapOf(
+                    "supported" to false,
+                    "paperOk" to true,
+                    "paperNearEnd" to false,
+                    "coverClosed" to true,
+                    "online" to true,
+                    "feedButtonPressed" to false,
+                    "printingErrorStopped" to false,
+                    "errorOccurred" to false,
+                    "autoCutterError" to false,
+                    "unrecoverableError" to false,
+                    "autoRecoverableError" to false
+                ))
+            }
         }
     }
 
@@ -594,36 +666,44 @@ class ThermalPrinterUsbPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             return
         }
 
-        try {
-            val startTime = System.currentTimeMillis()
-            val chunkSize = 16384 // 16KB
-            var offset = 0
+        usbExecutor.execute {
+            try {
+                val startTime = System.currentTimeMillis()
+                val chunkSize = 16384 // 16KB
+                var offset = 0
 
-            while (offset < bytes.size) {
-                val length = minOf(chunkSize, bytes.size - offset)
-                val chunk = bytes.copyOfRange(offset, offset + length)
-                val transferred = conn.bulkTransfer(ep, chunk, chunk.size, 5000)
+                while (offset < bytes.size) {
+                    val length = minOf(chunkSize, bytes.size - offset)
+                    val chunk = bytes.copyOfRange(offset, offset + length)
+                    val transferred = conn.bulkTransfer(ep, chunk, chunk.size, 5000)
 
-                if (transferred < 0) {
-                    cleanupConnection()
-                    emitConnectionLost()
-                    result.error("PRINT_ERROR", "Transfer failed at offset=$offset", null)
-                    return
+                    if (transferred < 0) {
+                        cleanupConnection()
+                        emitConnectionLost()
+                        Handler(Looper.getMainLooper()).post {
+                            result.error("PRINT_ERROR", "Transfer failed at offset=$offset", null)
+                        }
+                        return@execute
+                    }
+                    offset += length
                 }
-                offset += length
+
+                val elapsed = System.currentTimeMillis() - startTime
+
+                Handler(Looper.getMainLooper()).post {
+                    result.success(mapOf(
+                        "success" to true,
+                        "bytesTotal" to bytes.size,
+                        "transferTimeMs" to elapsed
+                    ))
+                }
+            } catch (e: Exception) {
+                cleanupConnection()
+                emitConnectionLost()
+                Handler(Looper.getMainLooper()).post {
+                    result.error("PRINT_ERROR", "Print error: ${e.message}", null)
+                }
             }
-
-            val elapsed = System.currentTimeMillis() - startTime
-
-            result.success(mapOf(
-                "success" to true,
-                "bytesTotal" to bytes.size,
-                "transferTimeMs" to elapsed
-            ))
-        } catch (e: Exception) {
-            cleanupConnection()
-            emitConnectionLost()
-            result.error("PRINT_ERROR", "Print error: ${e.message}", null)
         }
     }
 

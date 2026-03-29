@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'models/print_job.dart';
+import 'models/printer_alert.dart';
 import 'models/printer_log.dart';
 import 'models/printer_status.dart';
 import 'models/usb_device.dart';
@@ -102,6 +103,12 @@ class ThermalPrinterUsb {
   PrinterConnectionState _currentState = PrinterConnectionState.disconnected;
   List<UsbPrinterDevice> _lastKnownDevices = [];
 
+  // ─────────── Status polling ───────────
+
+  Timer? _statusPollTimer;
+  bool _polling = false;
+  static const Duration _pollInterval = Duration(seconds: 30);
+
   // ─────────── Print queue ───────────
 
   final List<PrintJob> _printQueue = [];
@@ -129,6 +136,10 @@ class ThermalPrinterUsb {
       StreamController<PrinterConnectionState>.broadcast();
   final StreamController<PaperWarning> _paperWarningController =
       StreamController<PaperWarning>.broadcast();
+  final StreamController<PrinterAlert> _printerAlertController =
+      StreamController<PrinterAlert>.broadcast();
+  final StreamController<PrinterStatus> _printerStatusController =
+      StreamController<PrinterStatus>.broadcast();
 
   PrinterStatus? _lastStatus;
 
@@ -183,6 +194,39 @@ class ThermalPrinterUsb {
   /// ```
   Stream<PaperWarning> get paperWarningStream => _paperWarningController.stream;
 
+  /// Stream of general printer alerts (cover open, slow transfer, job queued).
+  ///
+  /// Subscribe to this stream to show contextual notifications to the user.
+  ///
+  /// ```dart
+  /// printer.printerAlertStream.listen((alert) {
+  ///   switch (alert.type) {
+  ///     case PrinterAlertType.coverOpen:
+  ///       showDialog('Close the printer cover');
+  ///     case PrinterAlertType.slowTransfer:
+  ///       showSnackBar('Slow USB cable detected');
+  ///     case PrinterAlertType.jobQueued:
+  ///       showSnackBar('Job queued for retry');
+  ///   }
+  /// });
+  /// ```
+  Stream<PrinterAlert> get printerAlertStream => _printerAlertController.stream;
+
+  /// Stream of full printer status updates pushed by ASB (Automatic Status Back).
+  ///
+  /// Emits a [PrinterStatus] every time the printer's physical state changes
+  /// (cover, paper, errors). This is a native push from the printer — no polling.
+  ///
+  /// ```dart
+  /// printer.printerStatusStream.listen((status) {
+  ///   if (status.hasAnyError) {
+  ///     showAlert(status.summaryText);
+  ///   }
+  /// });
+  /// ```
+  Stream<PrinterStatus> get printerStatusStream =>
+      _printerStatusController.stream;
+
   // ─────────── Event Channel ───────────
 
   void _ensureEventChannelInitialized() {
@@ -194,6 +238,12 @@ class ThermalPrinterUsb {
         try {
           final map = event as Map<dynamic, dynamic>;
           final type = map['event'] as String;
+
+          // ── ASB status_changed: handle separately (no device/devices keys) ──
+          if (type == 'status_changed') {
+            _handleAsbStatusChanged(map);
+            return;
+          }
 
           UsbPrinterDevice? device;
           if (map['device'] != null) {
@@ -251,6 +301,79 @@ class ThermalPrinterUsb {
     }
   }
 
+  /// Handle ASB (Automatic Status Back) events pushed by the printer natively.
+  ///
+  /// This is called whenever the printer's physical state changes (cover, paper,
+  /// errors) — no polling involved.
+  void _handleAsbStatusChanged(Map<dynamic, dynamic> map) {
+    final coverClosed = map['coverClosed'] as bool? ?? true;
+    final paperOk = map['paperOk'] as bool? ?? true;
+    final paperNearEnd = map['paperNearEnd'] as bool? ?? false;
+    final online = map['online'] as bool? ?? true;
+
+    final status = PrinterStatus(
+      supported: true,
+      coverClosed: coverClosed,
+      paperOk: paperOk,
+      paperNearEnd: paperNearEnd,
+      online: online,
+      autoCutterError: map['autoCutterError'] as bool? ?? false,
+      unrecoverableError: map['unrecoverableError'] as bool? ?? false,
+      autoRecoverableError: map['autoRecoverableError'] as bool? ?? false,
+    );
+
+    final previousStatus = _lastStatus;
+    _lastStatus = status;
+
+    // Emit full status to stream
+    _printerStatusController.add(status);
+
+    debugPrint(
+      '📡 ASB: ${status.summaryText}'
+      '${map['rawBytes'] != null ? ' raw=${map['rawBytes']}' : ''}',
+    );
+
+    // ── Paper alerts ──
+    if (!paperOk && (previousStatus?.paperOk ?? true)) {
+      _paperWarningController.add(PaperWarning.empty);
+      _printerAlertController.add(
+        const PrinterAlert(
+          PrinterAlertType.noPaper,
+          message: 'No paper detected',
+        ),
+      );
+    } else if (paperNearEnd && !(previousStatus?.paperNearEnd ?? false)) {
+      _paperWarningController.add(PaperWarning.nearEnd);
+      _printerAlertController.add(
+        const PrinterAlert(
+          PrinterAlertType.paperNearEnd,
+          message: 'Paper is near end',
+        ),
+      );
+    } else if (paperOk && !(previousStatus?.paperOk ?? true)) {
+      _printerAlertController.add(
+        const PrinterAlert(PrinterAlertType.paperOk, message: 'Paper OK'),
+      );
+    }
+
+    // ── Cover alerts ──
+    if (!coverClosed && (previousStatus?.coverClosed ?? true)) {
+      _printerAlertController.add(
+        const PrinterAlert(
+          PrinterAlertType.coverOpen,
+          message: 'Printer cover is open',
+        ),
+      );
+    } else if (coverClosed && !(previousStatus?.coverClosed ?? true)) {
+      _printerAlertController.add(
+        const PrinterAlert(
+          PrinterAlertType.coverClosed,
+          message: 'Printer cover closed',
+        ),
+      );
+    }
+  }
+
   /// Attempt auto-reconnect if device matches saved printer
   Future<void> _tryAutoReconnect(UsbPrinterDevice? device) async {
     if (device == null || _autoReconnecting) return;
@@ -285,6 +408,43 @@ class ThermalPrinterUsb {
       _log('auto_reconnect', false, details: e.toString());
     } finally {
       _autoReconnecting = false;
+    }
+  }
+
+  /// Try to reconnect to the saved printer during a print attempt.
+  /// Returns `true` if reconnection succeeded.
+  Future<bool> _tryReconnectForPrint() async {
+    final targetVid = _savedVendorId;
+    final targetPid = _savedProductId;
+
+    if (targetVid == null || targetPid == null) {
+      debugPrint('ThermalPrinterUsb: No saved printer to reconnect to');
+      return false;
+    }
+
+    try {
+      // Get current device list
+      final devices = await getDevices();
+      final target = devices.where(
+        (d) => d.vendorId == targetVid && d.productId == targetPid,
+      );
+
+      if (target.isEmpty) {
+        debugPrint('ThermalPrinterUsb: Saved printer not found on USB bus');
+        return false;
+      }
+
+      debugPrint(
+        '🔄 ThermalPrinterUsb: Reconnecting to ${target.first.productName}...',
+      );
+      final success = await connect(target.first, autoReconnect: true);
+      if (success) {
+        debugPrint('🟢 ThermalPrinterUsb: Print-reconnect successful');
+      }
+      return success;
+    } catch (e) {
+      debugPrint('ThermalPrinterUsb: Reconnect error: $e');
+      return false;
     }
   }
 
@@ -434,6 +594,7 @@ class ThermalPrinterUsb {
         await _saveSelectedPrinter(device);
         _log('connect', true, details: device.productName);
         debugPrint('ThermalPrinterUsb: Connected to ${result['deviceName']}');
+        _startStatusPolling();
         return true;
       }
 
@@ -459,6 +620,7 @@ class ThermalPrinterUsb {
   /// await printer.disconnect();
   /// ```
   Future<void> disconnect({bool clearSaved = true}) async {
+    _stopStatusPolling();
     try {
       await _channel.invokeMethod('disconnect');
     } catch (e) {
@@ -587,18 +749,71 @@ class ThermalPrinterUsb {
   }) async {
     // Real connection check before printing
     if (!_isConnected || !await checkRealConnection()) {
-      debugPrint('ThermalPrinterUsb: Not connected — queuing job');
-      _enqueueJob(data, description);
-      return false;
+      debugPrint(
+        'ThermalPrinterUsb: Connection lost — attempting reconnect...',
+      );
+
+      // Try to reconnect using saved device info
+      final reconnected = await _tryReconnectForPrint();
+
+      if (!reconnected) {
+        debugPrint('ThermalPrinterUsb: Reconnect failed — queuing job');
+        _enqueueJob(data, description);
+        return false;
+      }
+
+      debugPrint('ThermalPrinterUsb: Reconnected successfully');
     }
 
-    // Pre-print paper check
+    // Block printing if ASB reports critical issues (no paper / cover open)
+    if (_lastStatus != null && checkPaper) {
+      if (!_lastStatus!.paperOk) {
+        debugPrint('ThermalPrinterUsb: Blocked — no paper (cached status)');
+        _paperWarningController.add(PaperWarning.empty);
+        _printerAlertController.add(
+          const PrinterAlert(
+            PrinterAlertType.noPaper,
+            message: 'Cannot print — no paper',
+          ),
+        );
+        return false;
+      }
+      if (!_lastStatus!.coverClosed) {
+        debugPrint('ThermalPrinterUsb: Blocked — cover open (cached status)');
+        _printerAlertController.add(
+          const PrinterAlert(
+            PrinterAlertType.coverOpen,
+            message: 'Cannot print — cover open',
+          ),
+        );
+        return false;
+      }
+    }
+
+    // Pre-print paper check via DLE EOT — blocks if critical issue found
     if (checkPaper) {
-      await _checkPaperBeforePrint();
+      final canPrint = await _checkPaperBeforePrint();
+      if (!canPrint) return false;
     }
 
     try {
-      final result = await _channel.invokeMethod('printBytes', {'bytes': data});
+      // Full hardware reset: ESC @ + explicit format defaults.
+      // Belt-and-suspenders: ESC @ alone should reset, but some printers
+      // don't fully honor it after a cut. Explicit commands guarantee clean state.
+      final resetPrefix = Uint8List.fromList([
+        0x1B, 0x40, // ESC @   — initialize printer
+        0x1D, 0x21, 0x00, // GS ! 0  — character size normal
+        0x1B, 0x61, 0x00, // ESC a 0 — align left
+        0x1B, 0x45, 0x00, // ESC E 0 — bold off
+        0x1B, 0x2D, 0x00, // ESC - 0 — underline off
+      ]);
+      final fullData = Uint8List(resetPrefix.length + data.length)
+        ..setRange(0, resetPrefix.length, resetPrefix)
+        ..setRange(resetPrefix.length, resetPrefix.length + data.length, data);
+
+      final result = await _channel.invokeMethod('printBytes', {
+        'bytes': fullData,
+      });
 
       if (result is Map && result['success'] == true) {
         final transferTimeMs = result['transferTimeMs'] as int?;
@@ -619,6 +834,13 @@ class ThermalPrinterUsb {
             details: 'Slow transfer: ${transferTimeMs}ms',
             transferTimeMs: transferTimeMs,
           );
+          _printerAlertController.add(
+            PrinterAlert(
+              PrinterAlertType.slowTransfer,
+              message: 'Transfer took ${transferTimeMs}ms',
+              transferTimeMs: transferTimeMs,
+            ),
+          );
         }
 
         return true;
@@ -630,9 +852,17 @@ class ThermalPrinterUsb {
     } catch (e) {
       debugPrint('ThermalPrinterUsb: Print error: $e');
       _isConnected = false;
-      _updateState(PrinterConnectionState.connectionLost);
       _log('print', false, details: e.toString());
-      _enqueueJob(data, description);
+
+      // ── Diagnose WHY the print failed ──
+      // Try reconnecting and checking status to give a specific error
+      final diagnosed = await _diagnosePostPrintError();
+
+      if (!diagnosed) {
+        // Could not determine specific cause → generic connection error
+        _updateState(PrinterConnectionState.connectionLost);
+        _enqueueJob(data, description);
+      }
       return false;
     }
   }
@@ -709,21 +939,117 @@ class ThermalPrinterUsb {
   }
 
   /// Check paper before printing and emit warning if needed.
-  Future<void> _checkPaperBeforePrint() async {
+  /// Returns `true` if printing can proceed, `false` if blocked.
+  Future<bool> _checkPaperBeforePrint() async {
     try {
       final status = await getPrinterStatus();
       _lastStatus = status;
-      if (!status.supported) return;
+      if (!status.supported) return true; // Can't check → allow print
 
+      // ── Critical: block printing ──
       if (!status.paperOk) {
         _paperWarningController.add(PaperWarning.empty);
-        _log('paper_check', false, details: 'NO PAPER');
-      } else if (status.paperNearEnd) {
-        _paperWarningController.add(PaperWarning.nearEnd);
-        _log('paper_check', false, details: 'Paper near end');
+        _printerAlertController.add(
+          const PrinterAlert(
+            PrinterAlertType.noPaper,
+            message: 'No paper detected',
+          ),
+        );
+        _log('paper_check', false, details: 'BLOCKED: NO PAPER');
+        debugPrint('🔴 ThermalPrinterUsb: Print BLOCKED — no paper');
+        return false;
       }
+
+      if (!status.coverClosed) {
+        _printerAlertController.add(
+          const PrinterAlert(
+            PrinterAlertType.coverOpen,
+            message: 'Printer cover is open',
+          ),
+        );
+        _log('paper_check', false, details: 'BLOCKED: COVER OPEN');
+        debugPrint('🔴 ThermalPrinterUsb: Print BLOCKED — cover open');
+        return false;
+      }
+
+      // ── Non-critical: warn but allow ──
+      if (status.paperNearEnd) {
+        _paperWarningController.add(PaperWarning.nearEnd);
+        _printerAlertController.add(
+          const PrinterAlert(
+            PrinterAlertType.paperNearEnd,
+            message: 'Paper is near end',
+          ),
+        );
+        _log('paper_check', true, details: 'Paper near end (allowed)');
+      }
+
+      // Emit full status to stream
+      _printerStatusController.add(status);
+      return true;
     } catch (e) {
       debugPrint('ThermalPrinterUsb: Paper check error: $e');
+      return true; // Error checking → allow print anyway
+    }
+  }
+
+  /// Diagnose why a print failed by attempting to reconnect and test.
+  ///
+  /// The TM-T20IIIL rejects ALL bulk transfers (including DLE EOT status
+  /// queries) when in an error state (no paper, cover open). So we can't
+  /// query specific status. Instead we infer from the pattern:
+  ///
+  ///   - Reconnection succeeds + transfers still fail = printer error
+  ///     (most likely no paper or cover open)
+  ///   - Reconnection fails = printer truly disconnected
+  ///
+  /// Returns `true` if a specific cause was diagnosed (alert emitted).
+  Future<bool> _diagnosePostPrintError() async {
+    try {
+      final reconnected = await _tryReconnectForPrint();
+
+      if (!reconnected) {
+        // Printer not on USB bus → truly disconnected
+        debugPrint('ThermalPrinterUsb: Cannot reconnect — truly disconnected');
+        return false;
+      }
+
+      // Printer reconnected. Try a tiny probe to see if transfers work now.
+      // If they still fail → printer has a hardware error (paper/cover).
+      try {
+        // Send a harmless ESC @ (initialize) — 2 bytes
+        final probeResult = await _channel.invokeMethod('printBytes', {
+          'bytes': Uint8List.fromList([0x1B, 0x40]),
+        });
+
+        if (probeResult is Map && probeResult['success'] == true) {
+          // Transfers work → the original error was transient
+          debugPrint(
+            'ThermalPrinterUsb: Probe succeeded — original error was transient',
+          );
+          return false;
+        }
+      } catch (_) {
+        // Probe also failed → printer is in error state
+      }
+
+      // Pattern: reconnection OK + transfers fail = printer error
+      debugPrint(
+        '🔴 ThermalPrinterUsb: DIAGNOSED — printer error '
+        '(likely no paper or cover open)',
+      );
+
+      _printerAlertController.add(
+        const PrinterAlert(
+          PrinterAlertType.noPaper,
+          message: 'Error de impresora — verifique papel y tapa',
+        ),
+      );
+      _paperWarningController.add(PaperWarning.empty);
+      return true;
+    } catch (e) {
+      debugPrint('ThermalPrinterUsb: Diagnose error: $e');
+      return false;
     }
   }
 
@@ -738,6 +1064,13 @@ class ThermalPrinterUsb {
     );
     debugPrint(
       '📋 ThermalPrinterUsb: Job queued. Queue: ${_printQueue.length} pending',
+    );
+    _printerAlertController.add(
+      PrinterAlert(
+        PrinterAlertType.jobQueued,
+        message: description,
+        pendingJobs: _printQueue.length,
+      ),
     );
   }
 
@@ -774,8 +1107,18 @@ class ThermalPrinterUsb {
       }
 
       try {
+        // Prepend ESC @ to reset printer state before retrying
+        final resetPrefix = Uint8List.fromList([0x1B, 0x40]);
+        final fullBytes = Uint8List(resetPrefix.length + job.bytes.length)
+          ..setRange(0, resetPrefix.length, resetPrefix)
+          ..setRange(
+            resetPrefix.length,
+            resetPrefix.length + job.bytes.length,
+            job.bytes,
+          );
+
         final result = await _channel.invokeMethod('printBytes', {
-          'bytes': job.bytes,
+          'bytes': fullBytes,
         });
         if (result is Map && result['success'] == true) {
           _log(
@@ -908,9 +1251,113 @@ class ThermalPrinterUsb {
   /// }
   /// ```
   void dispose() {
+    _stopStatusPolling();
     disconnect();
     _usbController.close();
     _stateController.close();
     _paperWarningController.close();
+    _printerAlertController.close();
+    _printerStatusController.close();
+  }
+
+  // ─────────── Status polling ───────────
+
+  /// Starts periodic status polling (every 30s) on the background thread.
+  ///
+  /// Only polls when connected and not currently printing/reconnecting.
+  /// Compares with last known status and only emits alerts on changes.
+  void _startStatusPolling() {
+    _stopStatusPolling();
+    debugPrint(
+      '📡 ThermalPrinterUsb: Status polling started (${_pollInterval.inSeconds}s)',
+    );
+    _statusPollTimer = Timer.periodic(_pollInterval, (_) => _pollStatus());
+  }
+
+  void _stopStatusPolling() {
+    _statusPollTimer?.cancel();
+    _statusPollTimer = null;
+    _polling = false;
+  }
+
+  Future<void> _pollStatus() async {
+    // Guards: skip if not connected, busy, or already polling
+    if (!_isConnected || _autoReconnecting || _polling) return;
+
+    _polling = true;
+    try {
+      final status = await getPrinterStatus();
+      if (!status.supported) {
+        _polling = false;
+        return;
+      }
+
+      final prev = _lastStatus;
+      _lastStatus = status;
+      _printerStatusController.add(status);
+
+      // ─── Emit alerts only on state CHANGES ───
+
+      // Paper near end (transition: was OK → now near end)
+      if (status.paperNearEnd && (prev == null || !prev.paperNearEnd)) {
+        debugPrint('⚠️ ThermalPrinterUsb: POLL — paper near end');
+        _paperWarningController.add(PaperWarning.nearEnd);
+        _printerAlertController.add(
+          const PrinterAlert(
+            PrinterAlertType.paperNearEnd,
+            message: 'Papel por acabarse',
+          ),
+        );
+      }
+
+      // Paper out (transition: was OK → now empty)
+      if (!status.paperOk && (prev == null || prev.paperOk)) {
+        debugPrint('🔴 ThermalPrinterUsb: POLL — no paper');
+        _paperWarningController.add(PaperWarning.empty);
+        _printerAlertController.add(
+          const PrinterAlert(
+            PrinterAlertType.noPaper,
+            message: 'Sin papel detectado',
+          ),
+        );
+      }
+
+      // Cover open (transition: was closed → now open)
+      if (!status.coverClosed && (prev == null || prev.coverClosed)) {
+        debugPrint('🔴 ThermalPrinterUsb: POLL — cover open');
+        _printerAlertController.add(
+          const PrinterAlert(
+            PrinterAlertType.coverOpen,
+            message: 'Tapa de impresora abierta',
+          ),
+        );
+      }
+
+      // Cover closed (recovery: was open → now closed)
+      if (status.coverClosed && prev != null && !prev.coverClosed) {
+        debugPrint('🟢 ThermalPrinterUsb: POLL — cover closed');
+        _printerAlertController.add(
+          const PrinterAlert(
+            PrinterAlertType.coverClosed,
+            message: 'Tapa cerrada — impresora lista',
+          ),
+        );
+      }
+
+      // Paper restored (recovery: was empty → now OK)
+      if (status.paperOk && prev != null && !prev.paperOk) {
+        debugPrint('🟢 ThermalPrinterUsb: POLL — paper restored');
+        _printerAlertController.add(
+          const PrinterAlert(
+            PrinterAlertType.paperOk,
+            message: 'Papel detectado — impresora lista',
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('ThermalPrinterUsb: Poll error (ignored): $e');
+    } finally {
+      _polling = false;
+    }
   }
 }
